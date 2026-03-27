@@ -4,28 +4,35 @@ from openai import OpenAI
 import os
 
 app = FastAPI()
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# This is safer: it won't crash if the key is missing on startup
+def get_client():
+    api_key = os.environ.get("OPENAI_API_KEY")
+    return OpenAI(api_key=api_key)
 
 class ChatRequest(BaseModel):
     user_message: str
     chat_history: list = []
 
+@app.get("/")
+async def health_check():
+    # This lets you check if Brah is alive in your browser
+    return {"status": "Brah is online", "model": "gpt-5.4-mini"}
+
 @app.post("/chat")
 async def ask_guru(request: ChatRequest):
-    # We start with the personality
-    messages = [{"role": "system", "content": "You are Brah, a minimalist, posh relationship guru. Your advice is wise and witty."}]
-
-    # We add the old messages so Brah remembers the context
+    client = get_client()
+    
+    messages = [{"role": "system", "content": "You are Brah, a minimalist, posh relationship guru."}]
+    
     for msg in request.chat_history:
         messages.append(msg)
-
-    # We add the new message from the user
+        
     messages.append({"role": "user", "content": request.user_message})
 
-    # We ask the brain for the answer
     completion = client.chat.completions.create(
         model="gpt-5.4-mini",
         messages=messages
     )
-
+    
     return {"reply": completion.choices[0].message.content}
