@@ -1,33 +1,83 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from openai import OpenAI
 import os
 import re
+import time
+import requests
 
 app = FastAPI()
 
-def get_client():
-    api_key = os.environ.get("OPENAI_API_KEY")
-    return OpenAI(api_key=api_key)
+# --- Configuration -----------------------------------------------------------
+# Your RunPod serverless endpoint ID and API key come from environment
+# variables set in Railway. Nothing secret is hard-coded here.
+RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID", "380d60bysquvph")
+RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
 
+# The model name must match what your RunPod endpoint serves.
+MODEL_NAME = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
+
+# RunPod's chat completions URL (RunPod-hosted, calls your Mistral endpoint only).
+RUNPOD_CHAT_URL = (
+    f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/openai/v1/chat/completions"
+)
+
+
+# --- Helpers -----------------------------------------------------------------
 def strip_markdown(text):
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
     text = re.sub(r'#{1,6}\s', '', text)
     return text.strip()
 
+
+def call_mistral(messages):
+    """Send the chat messages to the RunPod Mistral endpoint and return the
+    reply text. Retries a few times on transient failures."""
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 300,
+    }
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                RUNPOD_CHAT_URL,
+                headers=headers,
+                json=payload,
+                timeout=180,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            last_error = e
+            # brief pause before retrying a transient failure
+            time.sleep(2)
+
+    raise RuntimeError(f"Mistral request failed after 3 attempts: {last_error}")
+
+
+# --- Request model -----------------------------------------------------------
 class ChatRequest(BaseModel):
     user_message: str
     chat_history: list = []
 
+
+# --- Routes ------------------------------------------------------------------
 @app.get("/")
 async def health_check():
-    return {"status": "Brah is online", "model": "gpt-4o-mini"}
+    return {"status": "Brah is online", "model": MODEL_NAME}
+
 
 @app.post("/chat")
 async def ask_guru(request: ChatRequest):
-    client = get_client()
-    
     messages = [
         {
             "role": "system",
@@ -60,16 +110,11 @@ async def ask_guru(request: ChatRequest):
             )
         }
     ]
-    
+
     for msg in request.chat_history:
         messages.append(msg)
-        
+
     messages.append({"role": "user", "content": request.user_message})
-    
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages
-    )
-    
-    reply = completion.choices[0].message.content
+
+    reply = call_mistral(messages)
     return {"reply": strip_markdown(reply)}
