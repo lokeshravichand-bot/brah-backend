@@ -14,7 +14,7 @@ RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID", "380d60bysquvph")
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
 
 # The model name must match what your RunPod endpoint serves.
-MODEL_NAME = "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
+MODEL_NAME = "stelterlab/mistral-small-24b-instruct-2501-awq"
 
 # RunPod's chat completions URL (RunPod-hosted, calls your Mistral endpoint only).
 RUNPOD_CHAT_URL = (
