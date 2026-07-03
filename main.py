@@ -1,8 +1,9 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from pydantic import BaseModel
 import os
 import re
 import time
+import threading
 import requests
 
 app = FastAPI()
@@ -128,33 +129,35 @@ def fetch_memories(user_id, query):
         return memories
 
     except Exception as e:
-        print(f"[memory] fetch degraded - serving without memory: {e}")
+        print(f"[memory] fetch degraded - serving without memory: {e}", flush=True)
         return []
 
 
 def store_memory(user_id, user_message, reply):
     """Store the exchange in the memory box so Brah remembers it next time.
 
-    Runs AFTER the reply is sent to the user (as a background task), so storing
-    never delays their answer. Fails silently on any error - a missed store is
+    Runs in a background thread launched from /chat, so storing never delays
+    the user's reply. Fails silently on any error - a missed store is
     acceptable; a broken chat is not.
     """
     if not MEMORY_URL or not user_id:
         return
 
     try:
+        print(f"[memory] store starting for user {user_id}", flush=True)
         messages = [
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": reply},
         ]
-        requests.post(
+        resp = requests.post(
             f"{MEMORY_URL}/add",
             headers=MEMORY_HEADERS,
             json={"user_id": user_id, "messages": messages},
             timeout=ADD_TIMEOUT,
         )
+        print(f"[memory] store finished for user {user_id} - status {resp.status_code}", flush=True)
     except Exception as e:
-        print(f"[memory] store skipped - could not save this turn: {e}")
+        print(f"[memory] store FAILED for user {user_id}: {e}", flush=True)
 
 
 def build_memory_block(memories):
@@ -216,7 +219,7 @@ async def health_check():
 
 
 @app.post("/chat")
-async def ask_guru(request: ChatRequest, background_tasks: BackgroundTasks):
+async def ask_guru(request: ChatRequest):
     # 1. Fetch relevant memories first (safe - returns [] if the box is down).
     memories = fetch_memories(request.user_id, request.user_message)
 
@@ -234,9 +237,14 @@ async def ask_guru(request: ChatRequest, background_tasks: BackgroundTasks):
     reply = call_mistral(messages)
     clean_reply = strip_markdown(reply)
 
-    # 4. Store this exchange AFTER responding, so it never delays the user.
-    background_tasks.add_task(
-        store_memory, request.user_id, request.user_message, clean_reply
-    )
+    # 4. Store this exchange in our OWN background thread, launched here directly.
+    #    We do NOT use FastAPI BackgroundTasks - on this host that handoff was
+    #    getting dropped, so the store never completed. A daemon thread runs
+    #    the store independently and reliably, without delaying the user's reply.
+    threading.Thread(
+        target=store_memory,
+        args=(request.user_id, request.user_message, clean_reply),
+        daemon=True,
+    ).start()
 
     return {"reply": clean_reply}
