@@ -36,8 +36,11 @@ MEMORY_HEADERS = {
 }
 
 # How long to wait on the memory box before giving up and carrying on without it.
-SEARCH_TIMEOUT = 2   # seconds - fetching memories must be fast or we skip it
-ADD_TIMEOUT = 3      # seconds - storing memories happens after the reply is sent
+SEARCH_TIMEOUT = 2    # seconds - fetching memories must be fast or we skip it
+ADD_TIMEOUT = 90      # seconds - storing runs in the background AFTER the reply is
+                      # already sent, so a long timeout costs the user nothing. It
+                      # needs this room because memory extraction (via Mistral) can
+                      # take 20-90s, especially on a cold worker.
 
 
 # --- Helpers -----------------------------------------------------------------
