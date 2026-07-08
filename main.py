@@ -42,6 +42,9 @@ ADD_TIMEOUT = 90      # seconds - storing runs in the background AFTER the reply
                       # already sent, so a long timeout costs the user nothing. It
                       # needs this room because memory extraction (via Mistral) can
                       # take 20-90s, especially on a cold worker.
+DELETE_TIMEOUT = 120  # seconds - full account deletion runs memory (double-sweep) +
+                      # Firestore + Auth on the box. It's a rare, user-initiated action
+                      # and must complete fully, so we give it generous room.
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -182,6 +185,10 @@ class ChatRequest(BaseModel):
     user_id: str = ""
 
 
+class DeleteAccountRequest(BaseModel):
+    user_id: str
+
+
 # --- Base system prompt (Brah's voice) ---------------------------------------
 BASE_SYSTEM_PROMPT = (
     "You are Brah — a close friend who happens to be deeply wise about relationships and human communication. "
@@ -248,3 +255,41 @@ async def ask_guru(request: ChatRequest):
     ).start()
 
     return {"reply": clean_reply}
+
+
+@app.post("/delete-account")
+async def delete_account(request: DeleteAccountRequest):
+    """Fully delete a user across all surfaces (memory + Firestore + Auth).
+
+    This forwards the request to the memory box's /delete-account endpoint
+    through the private Cloudflare tunnel (same secured path as /search and
+    /add). The box holds the Firebase key and runs the actual four-surface
+    wipe; the backend just triggers it. The app's 'Delete Account' button
+    calls THIS endpoint.
+
+    Unlike memory store/fetch, deletion is NOT best-effort: if it fails, we
+    return an error so the app can tell the user it didn't complete, rather
+    than falsely confirming a deletion that didn't happen.
+    """
+    if not MEMORY_URL:
+        print("[delete-account] MEMORY_URL not configured - cannot delete", flush=True)
+        return {"result": "error", "error": "deletion service not configured"}
+
+    if not request.user_id:
+        return {"result": "error", "error": "user_id is required"}
+
+    try:
+        print(f"[delete-account] forwarding delete for user {request.user_id}", flush=True)
+        resp = requests.post(
+            f"{MEMORY_URL}/delete-account",
+            headers=MEMORY_HEADERS,
+            json={"user_id": request.user_id},
+            timeout=DELETE_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"[delete-account] result for user {request.user_id}: {data.get('result')}", flush=True)
+        return data
+    except Exception as e:
+        print(f"[delete-account] FAILED for user {request.user_id}: {e}", flush=True)
+        return {"result": "error", "user_id": request.user_id, "error": str(e)}
