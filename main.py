@@ -49,9 +49,14 @@ DELETE_TIMEOUT = 120  # seconds - full account deletion runs memory (double-swee
 
 # --- Helpers -----------------------------------------------------------------
 def strip_markdown(text):
+    # Fix tokenizer artifacts: Ġ (U+0120) is the model's marker for a leading
+    # space, Ċ (U+010A) for a newline. They sometimes leak through undecoded and
+    # show up as literal glyphs in replies. Convert them back to real whitespace.
+    text = text.replace("\u0120", " ").replace("\u010A", "\n")
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
     text = re.sub(r'#{1,6}\s', '', text)
+    text = re.sub(r' {2,}', ' ', text)   # collapse any double spaces created
     return text.strip()
 
 
