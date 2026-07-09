@@ -265,23 +265,23 @@ def is_crisis_message(text):
 # The frontend (FlutterFlow) renders the resource block specially (tappable).
 # `country` is an ISO-ish code passed from the app (e.g. "US"). Default: non-US.
 CRISIS_MESSAGE_US = (
-    "I might be reading this wrong \u2014 but the way you said that, I want to "
-    "stop and make sure you're okay.\n\n"
+    "I might be reading this wrong, but the way you said that, I want to stop "
+    "and make sure you're okay.\n\n"
     "You don't have to carry this by yourself, and there are people trained for "
     "exactly this moment who you can reach right now:\n\n"
-    "\ud83d\udcde Call 988 \u2014 Suicide & Crisis Lifeline\n"
-    "\ud83d\udcac Text 988\n"
+    "Call 988 - Suicide & Crisis Lifeline\n"
+    "Text 988\n"
     "Free, confidential, 24/7.\n\n"
     "I'm still right here with you too."
 )
 
 CRISIS_MESSAGE_INTL = (
-    "I might be reading this wrong \u2014 but the way you said that, I want to "
-    "stop and make sure you're okay.\n\n"
+    "I might be reading this wrong, but the way you said that, I want to stop "
+    "and make sure you're okay.\n\n"
     "You don't have to carry this by yourself. There are people trained for "
     "exactly this moment, and you can find a free, confidential crisis line for "
     "your country here:\n\n"
-    "\u2192 findahelpline.com\n\n"
+    "findahelpline.com\n\n"
     "I'm still right here with you too."
 )
 
