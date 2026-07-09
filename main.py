@@ -179,10 +179,126 @@ def build_memory_block(memories):
 
 
 # --- Request model -----------------------------------------------------------
+# --- CRISIS / SELF-HARM DETECTION --------------------------------------------
+# Deterministic, runs BEFORE Mistral, cannot be bypassed by the model.
+# Philosophy: catch explicit self-referential crisis language. Tuned
+# CONSERVATIVE - a false positive (showing the resource when not needed) is
+# survivable; a false negative (missing a real crisis) is not. This is a FLOOR,
+# not a ceiling: it catches explicit phrasings, not oblique/implicit ones. A
+# smarter classifier layer is a planned future hardening step.
+#
+# Legal basis: CA SB 243 (and similar) require a protocol that refers at-risk
+# users to crisis services when they express suicidal ideation / self-harm.
+# This must be deterministic - it must NOT depend on the LLM choosing to comply.
+import re
+
+# Tier 1: explicit self-referential crisis phrases -> FIRE.
+# These are matched as normalized substrings (see _normalize).
+CRISIS_PHRASES = [
+    # direct intent
+    "kill myself", "killing myself", "kill my self", "kms",
+    "end my life", "ending my life", "end it all", "ending it all",
+    "want to die", "wanna die", "want to be dead", "wanna be dead",
+    "dont want to live", "do not want to live",
+    "dont want to be alive", "do not want to be alive",
+    "dont want to be here anymore", "do not want to be here anymore",
+    "dont want to exist", "do not want to exist",
+    "take my own life", "taking my own life", "taking my life",
+    "commit suicide", "committing suicide", "suicidal", "suicide",
+    # hopelessness + self-removal
+    "better off without me", "world would be better without me",
+    "everyone would be better off without me",
+    "everyone would be better off if i",
+    "no reason to live", "no reason to go on", "nothing to live for",
+    "cant go on anymore", "cannot go on anymore",
+    "cant do this anymore", "cannot do this anymore",
+    "theres no point anymore", "there is no point anymore",
+    # self-harm
+    "hurt myself", "want to hurt myself", "harm myself", "want to harm myself",
+    "cut myself", "cutting myself",
+    # method / plan seeking (highest urgency)
+    "how to kill myself", "how to end my life", "ways to die",
+    "how to commit suicide", "painless way to die", "best way to kill myself",
+]
+
+# Tier 2: idioms that must NOT fire even though they contain trigger words.
+# If the message (normalized) is ONLY an innocent idiom around a trigger word,
+# we suppress. We do this by checking these safe patterns and requiring that a
+# real Tier-1 phrase is present. Kept simple: Tier-1 phrases above are specific
+# enough that most idioms ("killing me", "dying to see it") never match them.
+# This list is a documented reference of what we intentionally let through.
+KNOWN_SAFE_IDIOMS = [
+    "killing me", "this is killing me", "back is killing me",
+    "dying to", "dying of laughter", "dead tired", "dead serious",
+    "drop dead", "kill for a", "kill it", "killed it", "die hard",
+    "sudden death", "to die for",
+]
+
+
+def _normalize(text):
+    """Lowercase, remove apostrophes (so don't -> dont, can't -> cant), then
+    turn remaining punctuation into spaces, collapse whitespace. So
+    'Kill  myself!!!', "don't want to live", and 'kill myself' all match."""
+    t = text.lower()
+    t = t.replace("'", "").replace("\u2019", "")  # apostrophes -> nothing
+    t = re.sub(r"[^a-z0-9\s]", " ", t)            # other punctuation -> space
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def is_crisis_message(text):
+    """Return True if the message contains explicit self-referential crisis
+    language. Deterministic substring match on the normalized text."""
+    if not text:
+        return False
+    norm = _normalize(text)
+    padded = " " + norm + " "
+    for phrase in CRISIS_PHRASES:
+        # word-boundary-ish: surround with spaces so 'suicide' doesn't match
+        # inside another word, but 'kill myself' still matches mid-sentence.
+        if (" " + phrase + " ") in padded:
+            return True
+    return False
+
+
+# The fixed crisis response. Mistral does NOT write this. It is returned as-is.
+# The frontend (FlutterFlow) renders the resource block specially (tappable).
+# `country` is an ISO-ish code passed from the app (e.g. "US"). Default: non-US.
+CRISIS_MESSAGE_US = (
+    "I might be reading this wrong \u2014 but the way you said that, I want to "
+    "stop and make sure you're okay.\n\n"
+    "You don't have to carry this by yourself, and there are people trained for "
+    "exactly this moment who you can reach right now:\n\n"
+    "\ud83d\udcde Call 988 \u2014 Suicide & Crisis Lifeline\n"
+    "\ud83d\udcac Text 988\n"
+    "Free, confidential, 24/7.\n\n"
+    "I'm still right here with you too."
+)
+
+CRISIS_MESSAGE_INTL = (
+    "I might be reading this wrong \u2014 but the way you said that, I want to "
+    "stop and make sure you're okay.\n\n"
+    "You don't have to carry this by yourself. There are people trained for "
+    "exactly this moment, and you can find a free, confidential crisis line for "
+    "your country here:\n\n"
+    "\u2192 findahelpline.com\n\n"
+    "I'm still right here with you too."
+)
+
+
+def get_crisis_response(country):
+    """Return the fixed crisis message for the user's country."""
+    if country and country.strip().upper() == "US":
+        return CRISIS_MESSAGE_US
+    return CRISIS_MESSAGE_INTL
+
+
 class ChatRequest(BaseModel):
     user_message: str
     chat_history: list = []
     user_id: str = ""
+    country: str = ""   # device region code from the app (e.g. "US"); used only
+                        # to pick the crisis resource. Optional; defaults to intl.
 
 
 class DeleteAccountRequest(BaseModel):
@@ -227,6 +343,18 @@ async def health_check():
 
 @app.post("/chat")
 async def ask_guru(request: ChatRequest):
+    # 0. CRISIS CHECK - runs FIRST, before memory, before Mistral.
+    #    If the message expresses self-harm / suicidal intent, we short-circuit:
+    #    return the fixed crisis resource and DO NOT call Mistral at all. This is
+    #    deterministic and cannot be overridden by the model. `is_crisis: true`
+    #    tells the app to render this message specially (tappable helpline).
+    if is_crisis_message(request.user_message):
+        print(f"[crisis] triggered for user {request.user_id or 'anon'}", flush=True)
+        return {
+            "reply": get_crisis_response(request.country),
+            "is_crisis": True,
+        }
+
     # 1. Fetch relevant memories first (safe - returns [] if the box is down).
     memories = fetch_memories(request.user_id, request.user_message)
 
