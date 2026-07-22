@@ -42,9 +42,10 @@ ADD_TIMEOUT = 90      # seconds - storing runs in the background AFTER the reply
                       # already sent, so a long timeout costs the user nothing. It
                       # needs this room because memory extraction (via Mistral) can
                       # take 20-90s, especially on a cold worker.
-DELETE_TIMEOUT = 120  # seconds - full account deletion runs memory (double-sweep) +
-                      # Firestore + Auth on the box. It's a rare, user-initiated action
-                      # and must complete fully, so we give it generous room.
+DELETE_TIMEOUT = 30   # seconds - /delete-account now returns IMMEDIATELY (the box
+                      # runs the wipe in a background thread), so this only needs to
+                      # cover the round trip, not the deletion itself.
+STATUS_TIMEOUT = 20   # seconds - the status check reads the four surfaces directly.
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -195,7 +196,6 @@ def build_memory_block(memories):
 # Legal basis: CA SB 243 (and similar) require a protocol that refers at-risk
 # users to crisis services when they express suicidal ideation / self-harm.
 # This must be deterministic - it must NOT depend on the LLM choosing to comply.
-import re
 
 # Tier 1: explicit self-referential crisis phrases -> FIRE.
 # These are matched as normalized substrings (see _normalize).
@@ -227,11 +227,9 @@ CRISIS_PHRASES = [
 ]
 
 # Tier 2: idioms that must NOT fire even though they contain trigger words.
-# If the message (normalized) is ONLY an innocent idiom around a trigger word,
-# we suppress. We do this by checking these safe patterns and requiring that a
-# real Tier-1 phrase is present. Kept simple: Tier-1 phrases above are specific
-# enough that most idioms ("killing me", "dying to see it") never match them.
-# This list is a documented reference of what we intentionally let through.
+# The Tier-1 phrases above are specific enough that most idioms ("killing me",
+# "dying to see it") never match them. This list is a documented reference of
+# what we intentionally let through.
 KNOWN_SAFE_IDIOMS = [
     "killing me", "this is killing me", "back is killing me",
     "dying to", "dying of laughter", "dead tired", "dead serious",
@@ -392,17 +390,19 @@ async def ask_guru(request: ChatRequest):
 
 @app.post("/delete-account")
 async def delete_account(request: DeleteAccountRequest):
-    """Fully delete a user across all surfaces (memory + Firestore + Auth).
+    """START a full account deletion. Returns IMMEDIATELY.
 
-    This forwards the request to the memory box's /delete-account endpoint
-    through the private Cloudflare tunnel (same secured path as /search and
-    /add). The box holds the Firebase key and runs the actual four-surface
-    wipe; the backend just triggers it. The app's 'Delete Account' button
-    calls THIS endpoint.
+    Why immediately: FlutterFlow has a hard ~30-60s request timeout that cannot
+    be raised. A real user's deletion (memory + every chat's messages + profile
+    + auth) can take well over a minute, so holding the connection open would
+    time out on the client even though the deletion is succeeding. Instead the
+    box starts the wipe in a background thread and answers right away; the app
+    then polls /delete-account-status for live progress.
 
-    Unlike memory store/fetch, deletion is NOT best-effort: if it fails, we
-    return an error so the app can tell the user it didn't complete, rather
-    than falsely confirming a deletion that didn't happen.
+    Response: {"result": "deletion_started", "user_id": "..."}
+    The app must NOT treat this as "deleted" - it means "accepted and running".
+    Completion is confirmed only by /delete-account-status returning
+    status == "completed".
     """
     if not MEMORY_URL:
         print("[delete-account] MEMORY_URL not configured - cannot delete", flush=True)
@@ -412,7 +412,7 @@ async def delete_account(request: DeleteAccountRequest):
         return {"result": "error", "error": "user_id is required"}
 
     try:
-        print(f"[delete-account] forwarding delete for user {request.user_id}", flush=True)
+        print(f"[delete-account] starting deletion for user {request.user_id}", flush=True)
         resp = requests.post(
             f"{MEMORY_URL}/delete-account",
             headers=MEMORY_HEADERS,
@@ -421,8 +421,54 @@ async def delete_account(request: DeleteAccountRequest):
         )
         resp.raise_for_status()
         data = resp.json()
-        print(f"[delete-account] result for user {request.user_id}: {data.get('result')}", flush=True)
+        print(f"[delete-account] accepted for user {request.user_id}: {data.get('result')}", flush=True)
         return data
     except Exception as e:
-        print(f"[delete-account] FAILED for user {request.user_id}: {e}", flush=True)
+        print(f"[delete-account] FAILED to start for user {request.user_id}: {e}", flush=True)
         return {"result": "error", "user_id": request.user_id, "error": str(e)}
+
+
+@app.post("/delete-account-status")
+async def delete_account_status(request: DeleteAccountRequest):
+    """Report live progress of an in-flight account deletion.
+
+    The box answers by CHECKING THE ACTUAL FOUR SURFACES (memory vectors,
+    chat docs, the user profile doc, the auth record) rather than reading a
+    progress flag. That means it cannot report false progress, and it stays
+    correct even if a service restarted mid-deletion.
+
+    Response shape:
+      {
+        "user_id": "...",
+        "status": "in_progress" | "completed",
+        "stage": "memory" | "chats" | "profile" | "auth" | "done",
+        "completed": ["memory", "chats", ...],
+        "progress": 0-100,
+        "surfaces": {"memory": N, "chats": N, "user_doc": bool, "auth": bool}
+      }
+
+    The app should poll this every few seconds and drive its progress UI from
+    `progress` / `stage` / `completed`, and only sign the user out and show the
+    'account deleted' screen when status == "completed".
+    """
+    if not MEMORY_URL:
+        return {"status": "error", "error": "deletion service not configured"}
+
+    if not request.user_id:
+        return {"status": "error", "error": "user_id is required"}
+
+    try:
+        resp = requests.post(
+            f"{MEMORY_URL}/delete-account-status",
+            headers=MEMORY_HEADERS,
+            json={"user_id": request.user_id},
+            timeout=STATUS_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        # A failed status check is NOT a failed deletion - the wipe may still be
+        # running. Report the check failure so the app keeps polling rather than
+        # falsely telling the user the deletion failed.
+        print(f"[delete-account-status] check failed for user {request.user_id}: {e}", flush=True)
+        return {"status": "check_failed", "user_id": request.user_id, "error": str(e)}
